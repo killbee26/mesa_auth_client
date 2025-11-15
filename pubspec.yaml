@@ -1,0 +1,20 @@
+name: mesa_auth_client
+description: A starting point for Dart libraries or applications.
+version: 1.0.0
+# repository: https://github.com/my_org/my_repo
+
+environment:
+  sdk: ^3.9.0
+
+# Add regular dependencies here.
+dependencies:
+  # path: ^1.9.0
+  flutter_secure_storage: ^9.2.4 # Use the latest version
+  shared_preferences: ^2.5.3 # Use the latest version
+  http: ^1.6.0 # Use the latest version
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6
+  mockito: ^5.4.4 # Use the latest version
+  build_runner: ^2.4.6 # Use the latest versio
