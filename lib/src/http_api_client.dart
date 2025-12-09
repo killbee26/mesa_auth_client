@@ -1,13 +1,16 @@
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import '../mesa_auth_client.dart';
 import 'api_client.dart';
 import 'models/auth_tokens.dart';
 import 'models/auth_error.dart';
 
 class HttpApiClient implements ApiClient {
-  final String baseUrl;
+  final AuthConfig config;
+  String get baseUrl => config.baseUrl;
 
-  HttpApiClient({required this.baseUrl});
+
+  HttpApiClient(this.config);
 
   Future<AuthTokens> _handleResponse(http.Response response) async {
     if (response.statusCode == 200) {
@@ -48,12 +51,12 @@ class HttpApiClient implements ApiClient {
 
 
   @override
-  Future<AuthTokens> login(String email, String password) async {
+  Future<AuthTokens> login(String id, String password, String phone) async {
     final url = Uri.parse('$baseUrl/auth/login');
     final response = await http.post(
       url,
       headers: {'Content-Type': 'application/json'},
-      body: json.encode({'email': email, 'password': password}),
+      body: json.encode({'member_id': id, 'password': password, "mobile": phone}),
     );
     return _handleResponse(response);
   }
@@ -70,12 +73,14 @@ class HttpApiClient implements ApiClient {
   }
 
   @override
-  Future<void> logout(String sessionId, String refreshToken) async {
+  Future<void> logout(String sessionId, String authToken) async {
     final url = Uri.parse('$baseUrl/auth/logout');
     final response = await http.post(
       url,
-      headers: {'Content-Type': 'application/json'},
-      body: json.encode({'session_id': sessionId, 'refresh_token': refreshToken}),
+      headers: {'Content-Type': 'application/json',
+            'Authorization':'Bearer $authToken'
+      },
+      body: json.encode({'session_id': sessionId}),
     );
 
     if (response.statusCode != 200) {

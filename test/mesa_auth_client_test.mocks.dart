@@ -39,13 +39,17 @@ class MockApiClient extends _i1.Mock implements _i3.ApiClient {
   }
 
   @override
-  _i4.Future<_i2.AuthTokens> login(String? email, String? password) =>
+  _i4.Future<_i2.AuthTokens> login(
+    String? id,
+    String? password,
+    String? phone,
+  ) =>
       (super.noSuchMethod(
-            Invocation.method(#login, [email, password]),
+            Invocation.method(#login, [id, password, phone]),
             returnValue: _i4.Future<_i2.AuthTokens>.value(
               _FakeAuthTokens_0(
                 this,
-                Invocation.method(#login, [email, password]),
+                Invocation.method(#login, [id, password, phone]),
               ),
             ),
           )

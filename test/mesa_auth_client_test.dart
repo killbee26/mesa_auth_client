@@ -1,3 +1,4 @@
+import 'package:mesa_auth_client/mesa_auth_client.dart';
 import 'package:mesa_auth_client/src/auth_manager.dart';
 import 'package:mesa_auth_client/src/api_client.dart';
 import 'package:mesa_auth_client/src/session_storage.dart';
@@ -19,15 +20,22 @@ void main() {
     late MockSessionStorage mockSessionStorage;
 
     setUp(() {
-      mockApiClient = MockApiClient();
-      mockSessionStorage = MockSessionStorage();
+  mockApiClient = MockApiClient();
+  mockSessionStorage = MockSessionStorage();
 
-      authManager = AuthManager(
-        api: mockApiClient,
-        storage: mockSessionStorage,
-        expiringSoonThreshold: Duration(seconds: 30),
-      );
-    });
+  final config = AuthConfig(
+      baseUrl: "https://example.com",
+      storage: mockSessionStorage,
+      expiringSoonThreshold: Duration(seconds: 30),
+      refreshTimeout: Duration(seconds: 5),
+    );
+
+    authManager = AuthManager(
+      config: config,
+      api: mockApiClient,
+    );
+  });
+
 
     tearDown(() {
       reset(mockApiClient);
@@ -124,13 +132,13 @@ void main() {
         refreshTokenExpiry: now.add(Duration(days: 30)),
       );
 
-      when(mockApiClient.login(any, any)).thenAnswer((_) async => tokens);
+      when(mockApiClient.login(any, any, any)).thenAnswer((_) async => tokens);
       when(mockSessionStorage.saveTokens(tokens)).thenAnswer((_) async {});
 
-      await authManager.login('email', 'pass');
+      await authManager.login('id', 'pass','mobile');
 
       expect(authManager.currentStatus, AuthStatus.authenticated);
-      verify(mockApiClient.login('email', 'pass')).called(1);
+      verify(mockApiClient.login('id', 'pass', 'mobile')).called(1);
       verify(mockSessionStorage.saveTokens(tokens)).called(1);
     });
 
@@ -145,13 +153,13 @@ void main() {
         refreshTokenExpiry: now.add(Duration(days: 30)),
       );
 
-      when(mockApiClient.login(any, any)).thenAnswer((_) async => tokens);
+      when(mockApiClient.login(any, any, any)).thenAnswer((_) async => tokens);
       when(mockSessionStorage.saveTokens(tokens)).thenAnswer((_) async {});
       when(mockApiClient.logout(tokens.sessionId, tokens.refreshToken))
           .thenAnswer((_) async {});
       when(mockSessionStorage.clearTokens()).thenAnswer((_) async {});
 
-      await authManager.login('email', 'pass');
+      await authManager.login('id', 'pass','mobile');
       await authManager.logout();
 
       expect(authManager.currentStatus, AuthStatus.unauthenticated);
