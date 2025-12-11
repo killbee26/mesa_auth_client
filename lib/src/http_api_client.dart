@@ -9,31 +9,29 @@ class HttpApiClient implements ApiClient {
   final AuthConfig config;
   String get baseUrl => config.baseUrl;
 
-
   HttpApiClient(this.config);
 
   Future<AuthTokens> _handleResponse(http.Response response) async {
     if (response.statusCode == 200) {
       final Map<String, dynamic> data = json.decode(response.body);
 
-      // TODO: Adjust these keys to match your actual API response
       final accessToken = data['access_token'] as String?;
       final refreshToken = data['refresh_token'] as String?;
       final sessionId = data['session_id'] as String?;
       final accessTokenExpiry = data['access_token_expiry'] as String?;
       final refreshTokenExpiry = data['refresh_token_expiry'] as String?;
 
-      if (accessToken == null || refreshToken == null || sessionId == null || accessTokenExpiry == null || refreshTokenExpiry == null) {
+      if (accessToken == null || refreshToken == null || sessionId == null ||
+          accessTokenExpiry == null || refreshTokenExpiry == null) {
         throw AuthError(code: 'INVALID_RESPONSE', message: 'Missing token data in response');
       }
 
       final accessTokenExpiryDateTime = DateTime.tryParse(accessTokenExpiry);
       final refreshTokenExpiryDateTime = DateTime.tryParse(refreshTokenExpiry);
 
-       if (accessTokenExpiryDateTime == null || refreshTokenExpiryDateTime == null) {
+      if (accessTokenExpiryDateTime == null || refreshTokenExpiryDateTime == null) {
         throw AuthError(code: 'INVALID_RESPONSE', message: 'Invalid date format in response');
       }
-
 
       return AuthTokens(
         accessToken: accessToken,
@@ -42,13 +40,36 @@ class HttpApiClient implements ApiClient {
         accessTokenExpiry: accessTokenExpiryDateTime,
         refreshTokenExpiry: refreshTokenExpiryDateTime,
       );
-    } else if (response.statusCode == 401 || response.statusCode == 403) {
-      throw AuthError(code: 'UNAUTHORIZED', message: 'Invalid credentials');
+    } else if (response.statusCode == 401) {
+      // Try to get error details from response body
+      try {
+        final data = json.decode(response.body);
+        final errorCode = data['error'] ?? data['code'] ?? 'UNAUTHORIZED';
+        final errorMessage = data['message'] ?? 'Invalid credentials';
+
+        // Check for specific session/token errors
+        if (errorCode.toString().contains('session') ||
+            errorCode.toString().contains('revoked')) {
+          throw AuthError(code: 'SESSION_REVOKED', message: errorMessage);
+        }
+        if (errorCode.toString().contains('refresh') ||
+            errorCode.toString().contains('expired')) {
+          throw AuthError(code: 'REFRESH_TOKEN_EXPIRED', message: errorMessage);
+        }
+
+        throw AuthError(code: errorCode.toString(), message: errorMessage);
+      } catch (e) {
+        throw AuthError(code: 'UNAUTHORIZED', message: 'Authentication failed');
+      }
+    } else if (response.statusCode == 403) {
+      throw AuthError(code: 'SESSION_REVOKED', message: 'Session revoked or expired');
+    } else if (response.statusCode >= 500) {
+      // Server errors - these are NOT permanent
+      throw AuthError(code: 'SERVER_ERROR', message: 'Server error: ${response.statusCode}');
     } else {
       throw AuthError(code: 'NETWORK_ERROR', message: 'Request failed with status: ${response.statusCode}');
     }
   }
-
 
   @override
   Future<AuthTokens> login(String id, String password, String phone) async {
@@ -57,7 +78,7 @@ class HttpApiClient implements ApiClient {
       url,
       headers: {'Content-Type': 'application/json'},
       body: json.encode({'member_id': id, 'password': password, "mobile": phone}),
-    );
+    ).timeout(const Duration(seconds: 30));
     return _handleResponse(response);
   }
 
@@ -68,7 +89,7 @@ class HttpApiClient implements ApiClient {
       url,
       headers: {'Content-Type': 'application/json'},
       body: json.encode({'session_id': sessionId, 'refresh_token': refreshToken}),
-    );
+    ).timeout(const Duration(seconds: 30));
     return _handleResponse(response);
   }
 
@@ -77,14 +98,14 @@ class HttpApiClient implements ApiClient {
     final url = Uri.parse('$baseUrl/auth/logout');
     final response = await http.post(
       url,
-      headers: {'Content-Type': 'application/json',
-            'Authorization':'Bearer $authToken'
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $authToken'
       },
       body: json.encode({'session_id': sessionId}),
-    );
+    ).timeout(const Duration(seconds: 10));
 
-    if (response.statusCode != 200) {
-      // Log the error, but don't necessarily throw.  Logout should still clear local data.
+    if (response.statusCode != 200 && response.statusCode != 204) {
       print('Logout request failed with status: ${response.statusCode}');
     }
   }
