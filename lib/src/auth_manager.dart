@@ -22,7 +22,8 @@ class AuthManager {
   Timer? _expiryCheckTimer;
   Timer? _periodicRefreshTimer;
   int _consecutiveRefreshFailures = 0;
-  static const int _maxConsecutiveFailures = 10;
+
+  Future<void> Function()? onLogoutCallback;
 
   DateTime? _lastSuccessfulRefresh;
 
@@ -191,28 +192,53 @@ class AuthManager {
   // LOGOUT
   // ------------------------------------------------------
   Future<void> logout() async {
-    _log.info("⚠️ EXPLICIT LOGOUT - User intentionally logging out");
+    _log.info("⚠️ EXPLICIT LOGOUT");
 
     _stopExpiryMonitoring();
     _stopPeriodicRefresh();
     _consecutiveRefreshFailures = 0;
     _lastSuccessfulRefresh = null;
 
-    if (_tokens != null) {
+    final tokensToRevoke = _tokens;
+
+    // API logout
+    if (tokensToRevoke != null) {
       try {
-        await api.logout(_tokens!.sessionId, _tokens!.accessToken)
+        await api
+            .logout(tokensToRevoke.sessionId, tokensToRevoke.accessToken)
             .timeout(const Duration(seconds: 5));
-        _log.info("API logout successful");
+        _log.info("✅ API logout successful");
       } catch (e) {
         _log.warning("Logout API error (non-critical): $e");
       }
     }
 
+    // Clear storage and tokens
     await storage.clearTokens();
     _tokens = null;
+    _log.info("🔒 Tokens cleared");
+
+    // PowerSync cleanup with timeout (don't block logout)
+    if (onLogoutCallback != null) {
+      _log.info("🧹 PowerSync cleanup (max 2s timeout)...");
+      try {
+        await onLogoutCallback!().timeout(
+          const Duration(seconds: 2),
+          onTimeout: () {
+            _log.warning("⚠️ PowerSync cleanup timeout - continuing in background");
+          },
+        );
+        _log.info("✅ PowerSync cleanup completed");
+      } catch (e) {
+        _log.severe("❌ PowerSync cleanup error (non-critical): $e");
+      }
+    }
+
     _setStatus(AuthStatus.sessionInvalid);
-    _log.info("Logged out");
+    _log.info("✅ Logged out");
   }
+
+
 
   // ------------------------------------------------------
   // REFRESH WITH PERSISTENT RETRY
@@ -240,9 +266,9 @@ class AuthManager {
         final newTokens = await RetryHelper.withRetry(
           operation: () => api.refresh(_tokens!.sessionId, _tokens!.refreshToken),
           operationName: 'Token Refresh',
-          maxAttempts: 3,
-          initialDelay: const Duration(seconds: 1),
-          maxDelay: const Duration(seconds: 10),
+          maxAttempts: 5, // Increased from 3
+          initialDelay: const Duration(seconds: 2),
+          maxDelay: const Duration(seconds: 30),
           shouldRetry: (error) => !_isPermanentError(error),
         );
 
@@ -262,40 +288,35 @@ class AuthManager {
         _consecutiveRefreshFailures++;
         _log.severe("❌ AuthError during refresh (failure #$_consecutiveRefreshFailures): ${e.code}");
 
-        // CRITICAL: Only logout on permanent errors from server
+        // CRITICAL CHANGE: Only logout on EXPLICIT permanent errors
+        // Network errors, server errors, timeouts should NOT cause logout
         if (_isPermanentError(e)) {
-          _log.severe("🚫 Permanent error detected: ${e.code}");
-          await _handlePermanentFailure();
-          return Future.error(e);
+          _log.severe("🚫 Permanent error detected: ${e.code} - This is a server rejection");
+          // Even on permanent error, we'll keep the user "authenticated"
+          // but they'll get errors when making API calls
+          // They MUST explicitly logout
+          _log.warning("⚠️ User must manually logout due to server rejection");
         }
 
-        // For non-permanent errors, check if we should keep trying
-        if (_shouldKeepTrying()) {
-          _log.warning("⚠️ Temporary failure, will keep trying");
-          _setStatus(previousStatus == AuthStatus.authenticated
-              ? AuthStatus.authenticated
-              : AuthStatus.expiringSoon);
-          _scheduleBackgroundRefresh();
-        } else {
-          _log.severe("🚫 Too many failures, marking session invalid");
-          await _handlePermanentFailure();
-        }
+        // NEVER call _handlePermanentFailure() automatically
+        // Keep retrying in background
+        _log.warning("⚠️ Refresh failed but staying logged in, will retry");
+        _setStatus(previousStatus == AuthStatus.authenticated
+            ? AuthStatus.authenticated
+            : AuthStatus.expiringSoon);
+        _scheduleBackgroundRefresh();
 
         return Future.error(e);
       } catch (e) {
         _consecutiveRefreshFailures++;
         _log.severe("❌ Refresh error #$_consecutiveRefreshFailures: $e");
 
-        if (_shouldKeepTrying()) {
-          _log.warning("⚠️ Network error, will keep trying");
-          _setStatus(previousStatus == AuthStatus.authenticated
-              ? AuthStatus.authenticated
-              : AuthStatus.expiringSoon);
-          _scheduleBackgroundRefresh();
-        } else {
-          _log.severe("🚫 Too many network failures, marking session invalid");
-          await _handlePermanentFailure();
-        }
+        // Network/timeout errors - NEVER logout
+        _log.warning("⚠️ Network error, staying logged in, will retry");
+        _setStatus(previousStatus == AuthStatus.authenticated
+            ? AuthStatus.authenticated
+            : AuthStatus.expiringSoon);
+        _scheduleBackgroundRefresh();
 
         return Future.error(e);
       }
@@ -303,29 +324,23 @@ class AuthManager {
   }
 
   bool _shouldKeepTrying() {
-    // If we've exceeded max failures AND it's been less than 5 minutes since last success,
-    // keep the session alive
-    if (_consecutiveRefreshFailures >= _maxConsecutiveFailures) {
-      if (_lastSuccessfulRefresh != null) {
-        final timeSinceSuccess = DateTime.now().difference(_lastSuccessfulRefresh!);
-        if (timeSinceSuccess.inMinutes < 5) {
-          _log.info("⏰ Last success was ${timeSinceSuccess.inMinutes}m ago, keeping session");
-          return true;
-        }
-      }
-      return false;
+    // CRITICAL CHANGE: Always keep trying as long as we have a refresh token
+    // Never give up on token refresh attempts
+    if (_tokens != null && _tokens!.refreshTokenExpiry.isAfter(DateTime.now())) {
+      _log.info("🔄 Refresh token still valid, will keep trying indefinitely");
+      return true;
     }
-    return true;
+    return false;
   }
 
   void _scheduleBackgroundRefresh() {
-    // Schedule a retry in 30 seconds
-    _log.info("📅 Scheduling background refresh in 30s");
-    Future.delayed(const Duration(seconds: 30), () {
+    // CRITICAL: Schedule faster retries (15s instead of 30s)
+    _log.info("📅 Scheduling aggressive background refresh in 15s");
+    Future.delayed(const Duration(seconds: 15), () {
       if (_tokens != null && _currentStatus != AuthStatus.sessionInvalid) {
         _log.info("🔄 Background refresh attempt");
         _performRefresh().catchError((e) {
-          _log.warning("Background refresh failed: $e");
+          _log.warning("Background refresh failed, will retry again: $e");
         });
       }
     });
@@ -333,24 +348,42 @@ class AuthManager {
 
   bool _isPermanentError(dynamic error) {
     if (error is AuthError) {
-      // These are REAL permanent errors from the server
+      // CRITICAL: Be very strict about what's "permanent"
+      // Most errors should be treated as temporary/retryable
+      // Only explicit server rejections are permanent
       return error.code == "SESSION_REVOKED" ||
           error.code == "INVALID_REFRESH_TOKEN" ||
-          error.code == "REFRESH_TOKEN_EXPIRED";
+          error.code == "REFRESH_TOKEN_EXPIRED" ||
+          error.code == "ACCOUNT_DISABLED" ||
+          error.code == "ACCOUNT_DELETED";
     }
     return false;
   }
 
   Future<void> _handlePermanentFailure() async {
-    await storage.clearTokens();
-    _tokens = null;
+    // CRITICAL CHANGE: Don't clear tokens or logout automatically
+    // Just log the issue
+    _log.severe("⚠️ Permanent failure detected, but user must manually logout");
+    _log.severe("⚠️ Token refresh will keep retrying in case server recovers");
+
+    // Don't clear tokens
+    // await storage.clearTokens();
+    // _tokens = null;
+
     _consecutiveRefreshFailures = 0;
     _lastSuccessfulRefresh = null;
-    _stopExpiryMonitoring();
-    _stopPeriodicRefresh();
-    _setStatus(AuthStatus.sessionInvalid);
-    _log.warning("⚠️ Session permanently invalid");
+
+    // Don't stop monitoring - keep trying
+    // _stopExpiryMonitoring();
+    // _stopPeriodicRefresh();
+
+    // Don't set sessionInvalid - stay authenticated
+    // _setStatus(AuthStatus.sessionInvalid);
+
+    // Keep the user logged in
+    _log.warning("⚠️ User remains logged in despite server errors");
   }
+
 
   // ------------------------------------------------------
   // GET VALID ACCESS TOKEN
